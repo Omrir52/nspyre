@@ -163,7 +163,7 @@ class StreamingList(list):
 
     def clear(self):
         """See docs for Python list."""
-        for i in range(len(self)):
+        for i in range(len(self) - 1, -1, -1):  # Iterate in reverse order
             self.__delitem__(i)
 
     def sort(self, *args, **kwargs):
