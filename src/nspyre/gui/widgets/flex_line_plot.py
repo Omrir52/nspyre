@@ -1,18 +1,27 @@
 import logging
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Callable
 from typing import Dict
 from typing import Optional
+from typing import List
+from typing import Tuple
 
 import numpy as np
 from pyqtgraph.Qt import QtCore
 from pyqtgraph.Qt import QtGui
 from pyqtgraph.Qt import QtWidgets
+from PyQt5.QtGui import QColor
+import pyqtgraph 
 
 from ...data.sink import DataSink
+from ...data.file import save_pickle
 from ..threadsafe import QThreadSafeObject
 from .layout import tree_layout
 from .line_plot import LinePlotWidget
+from .save_load import _DataBackend
+from ..style._colors import cyclic_colors
 
 _logger = logging.getLogger(__name__)
 
@@ -190,6 +199,7 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
         new_source_func: Optional[Callable] = None,
         init_kwargs: Optional[Dict] = None,
         add_plot_kwargs: Optional[Dict] = None,
+        color_flip: bool = False,
     ):
         """
         Args:
@@ -219,12 +229,29 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
         )
         """Underlying LinePlotWidget."""
 
+        # Initialize quick save backend
+        self.quick_save_backend = _DataBackend()
+        self.destroyed.connect(self.quick_save_backend.stop)
+        self.quick_save_backend.start()
+        
+        # Create quicksave directory
+        self.quicksave_dir = Path.home() / "Documents" / "quicksave"
+        self.quicksave_dir.mkdir(parents=True, exist_ok=True)
+
         # data source lineedit
         self.datasource_lineedit = QtWidgets.QLineEdit()
 
         # data source connect button
         connect_button = QtWidgets.QPushButton('Connect')
         connect_button.clicked.connect(self._update_source_clicked)
+
+        # quick save button
+        quick_save_button = QtWidgets.QPushButton('Quick Save')
+        quick_save_button.clicked.connect(self._quick_save_clicked)
+
+        # Initialize color manager if requested
+        if color_flip:
+            self.plot_color_manager = PlotColorManager(self)
 
         # plot settings label
         plot_settings_label = QtWidgets.QLabel('Plot Settings')
@@ -307,6 +334,7 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
                 'label': QtWidgets.QLabel('Data Set'),
                 'edit': self.datasource_lineedit,
                 'button': connect_button,
+                'quick_save': quick_save_button,
             },
             'config': {
                 'type': QtWidgets.QHBoxLayout,
@@ -362,6 +390,13 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
                 },
             },
         }
+        
+        # Add color flip button to layout if requested
+        if color_flip:
+            del settings_layout_config['config']['list_buttons']['spacer_b']
+            settings_layout_config['config']['list_buttons']['color_flip'] = self.plot_color_manager.color_flip_button
+            settings_layout_config['config']['list_buttons']['spacer_b'] = expanding_spacer
+
         self.layout_tree = tree_layout(settings_layout_config)
         # make the plots list (index=2) take up all extra space (stretch=1)
         self.layout_tree.config.layout.setStretch(2, 1)
@@ -595,6 +630,48 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
     def _update_source_clicked(self):
         """Called when the user clicks the connect button."""
         self.line_plot.new_source(self.datasource_lineedit.text())
+
+    def _quick_save_clicked(self):
+        """Called when the user clicks the quick save button."""
+        dataset_name = self.datasource_lineedit.text().strip()
+        if not dataset_name:
+            QtWidgets.QMessageBox.warning(
+                self, "Warning", "Please enter a dataset name first."
+            )
+            return
+            
+        # Generate filename with current date and time
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = self.quicksave_dir / f"{dataset_name}_{timestamp}.pickle"
+        
+        # Pop data from the dataset and save it
+        try:
+            self.quick_save_backend.pop(
+                dataset=dataset_name,
+                timeout=self.line_plot.timeout,
+                callback=lambda keys: self._quick_save_data(filename)
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self, "Error", f"Failed to retrieve data: {str(e)}"
+            )
+
+    def _quick_save_data(self, filename: Path):
+        """Save the data that was popped to the specified filename."""
+        try:
+            self.quick_save_backend.save(
+                filename=filename,
+                save_fun=save_pickle,
+                callback=lambda: self._quick_save_complete(filename)
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self, "Error", f"Failed to save data: {str(e)}"
+            )
+
+    def _quick_save_complete(self, filename: Path):
+        """Called when quick save is complete."""
+        print(f"Quick save completed: {filename}")
 
 
 class _FlexLinePlotWidget(LinePlotWidget):
@@ -840,3 +917,80 @@ class _FlexLinePlotWidget(LinePlotWidget):
 
                     # update the plot
                     self.set_data(plot_name, processed_data[0], processed_data[1])
+
+class PlotColorManager:
+    """Class to manage plot color schemes between light and dark modes."""
+    
+    def __init__(self, plot_widget):
+        """
+        Initialize the plot color manager.
+        
+        Args:
+            plot_widget: The plot widget to manage colors for
+        """
+        self.plot_widget = plot_widget
+        self.color_list = cyclic_colors
+        self.setup_color_controls()
+        
+    def setup_color_controls(self) -> None:
+        """Set up the color control buttons and stacked widget."""
+        self.color_flip_button = QtWidgets.QStackedWidget()
+        self.light_plot_button = QtWidgets.QPushButton("Light Mode")
+        self.dark_plot_button = QtWidgets.QPushButton("Dark Mode")
+        
+        # Set fixed height to match other buttons
+        button_height = 32
+        self.light_plot_button.setFixedHeight(button_height)
+        self.dark_plot_button.setFixedHeight(button_height)
+        
+        self.light_plot_button.clicked.connect(self.light_plot)
+        self.dark_plot_button.clicked.connect(self.dark_plot)
+        
+        # Add buttons to stacked widget
+        self.color_flip_button.addWidget(self.light_plot_button)
+        self.color_flip_button.addWidget(self.dark_plot_button)
+        
+        
+    def get_plot_items(self):
+        """Get all plot items in the plot widget."""
+        return self.plot_widget.line_plot.plot_widget.items()
+
+    def get_current_plot_colors(self) -> List[Tuple[int, int, int, int]]:
+        """
+        Get the colors currently being used by plot items using pen color attributes.
+        
+        Returns:
+            List[Tuple[int, int, int, int]]: List of RGBA color tuples currently used in plots
+        """
+        colors = []
+        for item in self.get_plot_items():
+            if isinstance(item, pyqtgraph.PlotDataItem):
+                pen = item.opts['pen']
+                if type(pen) == QColor:
+                    colors.append(pen)
+        return colors if colors else self.color_list
+    
+    def light_plot(self) -> None:
+        """Switch to light plot mode."""
+        self.color_list = self.get_current_plot_colors()  # Get colors when button clicked
+        self.plot_widget.line_plot.plot_widget.setBackground('white')
+        item_counter = 0
+        for item in self.get_plot_items():
+            if isinstance(item, pyqtgraph.PlotDataItem):
+                item.setPen(pyqtgraph.mkPen(color=self.color_list[item_counter], width=5))
+                item.setSymbolBrush(pyqtgraph.mkBrush(color=(10, 10, 10, 100)))
+                item.setSymbolSize(0)
+                item_counter += 1
+        self.color_flip_button.setCurrentIndex(1)
+    
+    def dark_plot(self) -> None:
+        """Switch to dark plot mode."""
+        self.plot_widget.line_plot.plot_widget.setBackground('k')
+        item_counter = 0
+        for item in self.get_plot_items():
+            if isinstance(item, pyqtgraph.PlotDataItem):
+                item.setPen(pyqtgraph.mkPen(color=self.color_list[item_counter], width=1))
+                item.setSymbolBrush(pyqtgraph.mkBrush(color=(240, 240, 240, 100)))
+                item.setSymbolSize(5)
+                item_counter += 1
+        self.color_flip_button.setCurrentIndex(0)

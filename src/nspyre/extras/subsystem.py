@@ -288,3 +288,22 @@ class Subsystem(QObject):
         """
         self.exclusions.append(sub)
         sub.exclusions.append(self)
+
+    def reboot(
+        self,
+        boot_dependencies: bool = True,
+        shutdown_dependencies: bool = True,
+        force: bool = False,
+    ):
+        """Reboot the subsystem by shutting it down and then booting it again.
+
+        Args:
+            boot_dependencies: If True, boot all dependencies before booting
+                this subsystem.
+            shutdown_dependencies: If True, shutdown all dependencies after
+                shutting down this subsystem.
+            force: If True, ignore any exceptions while shutting down.
+        """
+        self.shutdown(shutdown_dependencies=shutdown_dependencies, force=force)
+        time.sleep(0.2)  # Give time for shutdown to complete
+        self.boot(boot_dependencies=boot_dependencies)

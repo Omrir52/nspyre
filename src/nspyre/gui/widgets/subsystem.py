@@ -115,6 +115,19 @@ class SubsystemsWidget(QtWidgets.QWidget):
 
         layout_row += 1
 
+        # reboot subsystem button
+        self.reboot_button = QtWidgets.QPushButton('Reboot')
+        self.reboot_button.clicked.connect(self._reboot_clicked)
+        buttons_layout.addWidget(self.reboot_button, layout_row, 0)
+
+        # reboot dependencies checkbox
+        self.reboot_dependencies_checkbox = QtWidgets.QCheckBox()
+        self.reboot_dependencies_checkbox.setChecked(True)
+        self.reboot_dependencies_checkbox.setText('Reboot Dependencies')
+        buttons_layout.addWidget(self.reboot_dependencies_checkbox, layout_row, 1)
+
+        layout_row += 1
+
         # force shutdown checkbox
         self.force_shutdown_checkbox = QtWidgets.QCheckBox()
         self.force_shutdown_checkbox.setChecked(False)
@@ -163,3 +176,19 @@ class SubsystemsWidget(QtWidgets.QWidget):
     def _boot(self, subsys):
         boot_dependencies = self.boot_dependencies_checkbox.isChecked()
         subsys.boot(boot_dependencies=boot_dependencies)
+
+    def _reboot_clicked(self):
+        # get the currently selected tree index
+        selected_tree_index = self.subsys_tree_widget.selectedIndexes()[0]
+        # retrieve the item
+        tree_subsys_item = self.subsys_tree_widget.model().itemFromIndex(
+            selected_tree_index
+        )
+        boot_dependencies = self.reboot_dependencies_checkbox.isChecked()
+        shutdown_dependencies = self.shutdown_dependencies_checkbox.isChecked()
+        force = self.force_shutdown_checkbox.isChecked()
+        tree_subsys_item.subsys.reboot(
+            boot_dependencies=boot_dependencies,
+            shutdown_dependencies=shutdown_dependencies,
+            force=force
+        )
