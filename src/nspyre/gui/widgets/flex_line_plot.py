@@ -200,6 +200,7 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
         init_kwargs: Optional[Dict] = None,
         add_plot_kwargs: Optional[Dict] = None,
         color_flip: bool = False,
+        fun_fit: bool = False,
     ):
         """
         Args:
@@ -302,6 +303,11 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
         remove_button = QtWidgets.QPushButton('Remove')
         remove_button.clicked.connect(self._remove_plot_clicked)
 
+        # fit button
+        if fun_fit:
+            fit_button = QtWidgets.QPushButton('Fit')
+            fit_button.clicked.connect(self._fun_fit_clicked)
+
         # plots label
         plots_label = QtWidgets.QLabel('Plots')
         plots_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
@@ -397,6 +403,11 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
             settings_layout_config['config']['list_buttons']['color_flip'] = self.plot_color_manager.color_flip_button
             settings_layout_config['config']['list_buttons']['spacer_b'] = expanding_spacer
 
+        if fun_fit:
+            del settings_layout_config['config']['settings_buttons']['spacer_b']
+            settings_layout_config['config']['settings_buttons']['fit'] = fit_button
+            settings_layout_config['config']['settings_buttons']['spacer_b'] = expanding_spacer
+
         self.layout_tree = tree_layout(settings_layout_config)
         # make the plots list (index=2) take up all extra space (stretch=1)
         self.layout_tree.config.layout.setStretch(2, 1)
@@ -477,6 +488,16 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
             scan_j,
             processing,
         )
+    
+    def _fun_fit_clicked(self):
+        name, series, _, _, _ = self._get_plot_settings()
+        fit_sink = DataSink(self.datasource_lineedit.text())
+        fit_sink.start()
+        fit_sink.pop()
+        fit_sink.stop()
+        data = fit_sink.data_series[series]
+
+
 
     def _add_plot_clicked(self):
         """Called when the user clicks the add button."""
@@ -994,3 +1015,7 @@ class PlotColorManager:
                 item.setSymbolSize(5)
                 item_counter += 1
         self.color_flip_button.setCurrentIndex(0)
+
+class FittingGui:
+    def __init__():
+        test = 'test'

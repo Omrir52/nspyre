@@ -1,5 +1,8 @@
 import logging
 import queue
+import subprocess
+import threading
+import time
 from functools import partial
 from importlib import reload
 from multiprocessing import Queue
@@ -34,6 +37,7 @@ class ExperimentWidget(QtWidgets.QWidget):
         title: Optional[str] = None,
         kill: bool = False,
         layout: QtWidgets.QLayout = None,
+        pyro_reboot: bool = False,
     ):
         """
         Args:
@@ -58,6 +62,8 @@ class ExperimentWidget(QtWidgets.QWidget):
                 running the experiment function.
             layout: Additional Qt layout to place between the parameters and
                 run/stop/kill buttons.
+            pyro_reboot: Enable timeout-based stopping with automatic pyro daemon
+                restart if the process doesn't stop gracefully.
         """
         super().__init__()
 
@@ -67,6 +73,8 @@ class ExperimentWidget(QtWidgets.QWidget):
         self.module = module
         self.cls = cls
         self.fun_name = fun_name
+        self.pyro_reboot = pyro_reboot
+
         if constructor_args is not None:
             self.constructor_args = constructor_args
         else:
@@ -197,13 +205,140 @@ class ExperimentWidget(QtWidgets.QWidget):
         Args:
             log: if True, log when stop is called but the process isn't running.
         """
-        if self.run_proc.running():
-            self.queue_to_exp.put('stop')
-        else:
+        if not self.run_proc.running():
             if log:
                 logging.info(
                     'Not stopping the experiment process because it is not running.'
                 )
+            return
+
+        # Always send stop signal first (preserve base functionality)
+        self.queue_to_exp.put('stop')
+
+        if self.pyro_reboot:
+            # Use timeout-based monitoring with pyro reboot
+            self._monitor_stop_with_reboot()
+
+    def _monitor_stop_with_reboot(self):
+        """Monitor stop process and restart pyro daemon if force kill is needed."""
+        def force_kill_after_timeout():
+            """Kill the process if it doesn't stop gracefully within timeout."""
+            check_interval = 0.5  # Check every 0.5 seconds
+            max_checks = 10       # Check 10 times (total 5 seconds)
+
+            for check_count in range(max_checks):
+                time.sleep(check_interval)
+                if not self.run_proc.running():
+                    # Process stopped gracefully, no need to kill
+                    return
+
+            # Process still running after all checks, force kill
+            if self.run_proc.running():
+                print(f"Process didn't stop gracefully after {max_checks * check_interval}s, forcing kill...")
+                self.run_proc.kill()
+
+                # Restart pyro daemon after force kill
+                self._restart_rfsoc_daemon()
+
+        # Start the timeout monitor in a separate thread
+        threading.Thread(target=force_kill_after_timeout, daemon=True).start()
+
+    def _restart_rfsoc_daemon(self):
+        """Restart the Pyro daemon on the RFSoC via SSH."""
+        try:
+            # Try to import RFSoC configuration
+            from compton_nspyre.config import ip_addrs, rfsoc_user, rfsoc_pwd
+
+            rfsoc_ip = ip_addrs['rfsoc']  
+            username = rfsoc_user         
+            password = rfsoc_pwd
+
+            # Combined command to kill, wait, then start
+            combined_command = f"echo '{password}' | sudo -S pkill -9 python; sleep 2; echo '{password}' | sudo -S bash -c 'source /etc/profile && cd /qick-spin/pyro4 && nohup python pyro_service.py > pyro.log 2>&1 &'"
+            
+            print("Attempting to restart RFSoC Pyro daemon...")
+            
+            # Try using plink (PuTTY) first if available on Windows
+            try:
+                # First try to cache the host key automatically
+                self._cache_host_key(rfsoc_ip, username, password)
+                
+                plink_cmd = [
+                    "plink", "-ssh", "-batch", "-pw", password,
+                    f"{username}@{rfsoc_ip}",
+                    combined_command
+                ]
+                
+                result = subprocess.run(
+                    plink_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=20
+                )
+                
+                if result.returncode == 0:
+                    print("RFSoC Pyro daemon restart completed using plink")
+                else:
+                    print(f"plink command failed: {result.stderr}")
+                    
+            except FileNotFoundError:
+                # plink not available, use standard SSH with combined command
+                print("plink not found, using standard SSH...")
+                
+                ssh_cmd = [
+                    "ssh", 
+                    "-o", "StrictHostKeyChecking=no",  # Accept unknown host keys
+                    "-o", "UserKnownHostsFile=/dev/null",  # Don't save host keys
+                    f"{username}@{rfsoc_ip}",
+                    combined_command
+                ]
+                
+                result = subprocess.run(
+                    ssh_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=20
+                )
+                
+                if result.returncode == 0:
+                    print("RFSoC Pyro daemon restart completed")
+                else:
+                    print(f"SSH command failed: {result.stderr}")
+                
+        except ImportError:
+            print("RFSoC configuration not available, skipping daemon restart")
+        except subprocess.TimeoutExpired:
+            print("SSH command timed out")
+        except Exception as e:
+            print(f"Error restarting RFSoC daemon: {e}")
+
+    def _cache_host_key(self, host_ip, username, password):
+        """Cache the host key for future connections."""
+        try:
+            print("Attempting to cache host key...")
+            
+            # Use plink to cache the host key by connecting and immediately exiting
+            # The 'echo y' will automatically accept the host key prompt
+            cache_cmd = [
+                "cmd", "/c", 
+                f'echo y | plink -ssh -pw {password} {username}@{host_ip} "exit"'
+            ]
+            
+            result = subprocess.run(
+                cache_cmd,
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+            
+            # plink may return non-zero even on success when just caching keys
+            if "The server's host key is not cached" in result.stderr or result.returncode == 0:
+                print("Host key cached successfully")
+            else:
+                print(f"Host key caching result: {result.stderr}")
+                
+        except Exception as e:
+            print(f"Error caching host key: {e}")
 
     def kill(self):
         """Kill the experiment subprocess."""
@@ -213,7 +348,6 @@ class ExperimentWidget(QtWidgets.QWidget):
             logging.info(
                 'Not killing the experiment process because it is not running.'
             )
-
 
 def experiment_widget_process_queue(msg_queue) -> Optional[str]:
     """Reads messages sent/received to/from a multiprocessing :code:`Queue` by \
