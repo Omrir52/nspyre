@@ -13,7 +13,7 @@ from pyqtgraph.Qt import QtCore
 from pyqtgraph.Qt import QtGui
 from pyqtgraph.Qt import QtWidgets
 from PyQt5.QtGui import QColor
-import pyqtgraph 
+import pyqtgraph
 
 from ...data.sink import DataSink
 from ...data.file import save_pickle
@@ -22,6 +22,7 @@ from .layout import tree_layout
 from .line_plot import LinePlotWidget
 from .save_load import _DataBackend
 from ..style._colors import cyclic_colors
+from .fitting import FittingGUI
 
 _logger = logging.getLogger(__name__)
 
@@ -234,10 +235,14 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
         self.quick_save_backend = _DataBackend()
         self.destroyed.connect(self.quick_save_backend.stop)
         self.quick_save_backend.start()
-        
+
         # Create quicksave directory
         self.quicksave_dir = Path.home() / "Documents" / "quicksave"
         self.quicksave_dir.mkdir(parents=True, exist_ok=True)
+
+        # Track open fitting GUIs to prevent duplicates
+        # Key: (name, series), Value: FittingGUI instance
+        self._open_fitting_guis = {}
 
         # data source lineedit
         self.datasource_lineedit = QtWidgets.QLineEdit()
@@ -396,7 +401,7 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
                 },
             },
         }
-        
+
         # Add color flip button to layout if requested
         if color_flip:
             del settings_layout_config['config']['list_buttons']['spacer_b']
@@ -425,6 +430,18 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
         layout.addWidget(splitter)
 
         self.setLayout(layout)
+
+        # Connect cleanup function to widget destruction
+        self.destroyed.connect(self._cleanup_fitting_guis)
+
+    def _cleanup_fitting_guis(self):
+        """Clean up any open fitting GUI windows when the main widget is destroyed."""
+        for fitting_gui in self._open_fitting_guis.values():
+            if (hasattr(fitting_gui, 'new_window')
+                and fitting_gui.new_window is not None
+                    and fitting_gui.new_window.isVisible()):
+                fitting_gui.new_window.close()
+        self._open_fitting_guis.clear()
 
     def _plot_selection_changed(self):
         """Called when the selected plot changes."""
@@ -488,16 +505,48 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
             scan_j,
             processing,
         )
-    
+
     def _fun_fit_clicked(self):
         name, series, _, _, _ = self._get_plot_settings()
-        fit_sink = DataSink(self.datasource_lineedit.text())
-        fit_sink.start()
-        fit_sink.pop()
-        fit_sink.stop()
-        data = fit_sink.data_series[series]
+        fit_sink_name = self.datasource_lineedit.text()
 
+        # Create a unique key for this name/series combination
+        fitting_key = (name, series)
 
+        # Check if a fitting GUI is already open for this combination
+        if fitting_key in self._open_fitting_guis:
+            existing_gui = self._open_fitting_guis[fitting_key]
+
+            # Check if the existing GUI window is still valid and visible
+            if (hasattr(existing_gui, 'new_window')
+                and existing_gui.new_window is not None
+                    and existing_gui.new_window.isVisible()):
+
+                # Bring existing window to front and focus it
+                existing_gui.new_window.raise_()
+                existing_gui.new_window.activateWindow()
+                return
+            else:
+                # Remove invalid reference
+                del self._open_fitting_guis[fitting_key]
+
+        # Create new fitting GUI
+        fitting_gui = FittingGUI(fit_sink_name, series, name)
+
+        # Store reference to track this GUI
+        self._open_fitting_guis[fitting_key] = fitting_gui
+
+        # Connect to window close event to clean up our reference
+        def on_window_closed():
+            if fitting_key in self._open_fitting_guis:
+                del self._open_fitting_guis[fitting_key]
+
+        # Open the fitting window
+        fitting_gui.fit_fun_window()
+
+        # Connect cleanup function to window destroyed signal if window exists
+        if hasattr(fitting_gui, 'new_window') and fitting_gui.new_window is not None:
+            fitting_gui.new_window.destroyed.connect(on_window_closed)
 
     def _add_plot_clicked(self):
         """Called when the user clicks the add button."""
@@ -508,7 +557,6 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
         self, name: str, series: str, scan_i: str, scan_j: str, processing: str
     ):
         """Add a new subplot. Thread safe.
-
         Args:
             name: Name for the new plot.
             series: The data series name pushed by the \
@@ -660,11 +708,11 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
                 self, "Warning", "Please enter a dataset name first."
             )
             return
-            
+
         # Generate filename with current date and time
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = self.quicksave_dir / f"{dataset_name}_{timestamp}.pickle"
-        
+
         # Pop data from the dataset and save it
         try:
             self.quick_save_backend.pop(
@@ -907,11 +955,11 @@ class _FlexLinePlotWidget(LinePlotWidget):
                             if scan_i == '' and scan_j == '':
                                 data_subset = data[:]
                             elif scan_j == '':
-                                data_subset = data[int(scan_i) :]
+                                data_subset = data[int(scan_i):]
                             elif scan_i == '':
                                 data_subset = data[: int(scan_j)]
                             else:
-                                data_subset = data[int(scan_i) : int(scan_j)]
+                                data_subset = data[int(scan_i): int(scan_j)]
                         except IndexError:
                             _logger.warning(
                                 f'Data series [{series}] invalid scan indices '
@@ -939,39 +987,39 @@ class _FlexLinePlotWidget(LinePlotWidget):
                     # update the plot
                     self.set_data(plot_name, processed_data[0], processed_data[1])
 
+
 class PlotColorManager:
     """Class to manage plot color schemes between light and dark modes."""
-    
+
     def __init__(self, plot_widget):
         """
         Initialize the plot color manager.
-        
+
         Args:
             plot_widget: The plot widget to manage colors for
         """
         self.plot_widget = plot_widget
         self.color_list = cyclic_colors
         self.setup_color_controls()
-        
+
     def setup_color_controls(self) -> None:
         """Set up the color control buttons and stacked widget."""
         self.color_flip_button = QtWidgets.QStackedWidget()
         self.light_plot_button = QtWidgets.QPushButton("Light Mode")
         self.dark_plot_button = QtWidgets.QPushButton("Dark Mode")
-        
+
         # Set fixed height to match other buttons
         button_height = 32
         self.light_plot_button.setFixedHeight(button_height)
         self.dark_plot_button.setFixedHeight(button_height)
-        
+
         self.light_plot_button.clicked.connect(self.light_plot)
         self.dark_plot_button.clicked.connect(self.dark_plot)
-        
+
         # Add buttons to stacked widget
         self.color_flip_button.addWidget(self.light_plot_button)
         self.color_flip_button.addWidget(self.dark_plot_button)
-        
-        
+
     def get_plot_items(self):
         """Get all plot items in the plot widget."""
         return self.plot_widget.line_plot.plot_widget.items()
@@ -979,7 +1027,7 @@ class PlotColorManager:
     def get_current_plot_colors(self) -> List[Tuple[int, int, int, int]]:
         """
         Get the colors currently being used by plot items using pen color attributes.
-        
+
         Returns:
             List[Tuple[int, int, int, int]]: List of RGBA color tuples currently used in plots
         """
@@ -990,7 +1038,7 @@ class PlotColorManager:
                 if type(pen) == QColor:
                     colors.append(pen)
         return colors if colors else self.color_list
-    
+
     def light_plot(self) -> None:
         """Switch to light plot mode."""
         self.color_list = self.get_current_plot_colors()  # Get colors when button clicked
@@ -998,23 +1046,26 @@ class PlotColorManager:
         item_counter = 0
         for item in self.get_plot_items():
             if isinstance(item, pyqtgraph.PlotDataItem):
-                item.setPen(pyqtgraph.mkPen(color=self.color_list[item_counter], width=5))
+                item.setPen(pyqtgraph.mkPen(
+                    color=self.color_list[item_counter], width=5))
                 item.setSymbolBrush(pyqtgraph.mkBrush(color=(10, 10, 10, 100)))
                 item.setSymbolSize(0)
                 item_counter += 1
         self.color_flip_button.setCurrentIndex(1)
-    
+
     def dark_plot(self) -> None:
         """Switch to dark plot mode."""
         self.plot_widget.line_plot.plot_widget.setBackground('k')
         item_counter = 0
         for item in self.get_plot_items():
             if isinstance(item, pyqtgraph.PlotDataItem):
-                item.setPen(pyqtgraph.mkPen(color=self.color_list[item_counter], width=1))
+                item.setPen(pyqtgraph.mkPen(
+                    color=self.color_list[item_counter], width=1))
                 item.setSymbolBrush(pyqtgraph.mkBrush(color=(240, 240, 240, 100)))
                 item.setSymbolSize(5)
                 item_counter += 1
         self.color_flip_button.setCurrentIndex(0)
+
 
 class FittingGui:
     def __init__():
