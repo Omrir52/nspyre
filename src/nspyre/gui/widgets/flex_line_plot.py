@@ -22,7 +22,7 @@ from .layout import tree_layout
 from .line_plot import LinePlotWidget
 from .save_load import _DataBackend
 from ..style._colors import cyclic_colors
-from .fitting import FittingGUI
+# from .fitting import FittingGUI  # Commented out - FittingGUI not implemented
 
 _logger = logging.getLogger(__name__)
 
@@ -505,48 +505,6 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
             scan_j,
             processing,
         )
-
-    def _fun_fit_clicked(self):
-        name, series, _, _, _ = self._get_plot_settings()
-        fit_sink_name = self.datasource_lineedit.text()
-
-        # Create a unique key for this name/series combination
-        fitting_key = (name, series)
-
-        # Check if a fitting GUI is already open for this combination
-        if fitting_key in self._open_fitting_guis:
-            existing_gui = self._open_fitting_guis[fitting_key]
-
-            # Check if the existing GUI window is still valid and visible
-            if (hasattr(existing_gui, 'new_window')
-                and existing_gui.new_window is not None
-                    and existing_gui.new_window.isVisible()):
-
-                # Bring existing window to front and focus it
-                existing_gui.new_window.raise_()
-                existing_gui.new_window.activateWindow()
-                return
-            else:
-                # Remove invalid reference
-                del self._open_fitting_guis[fitting_key]
-
-        # Create new fitting GUI
-        fitting_gui = FittingGUI(fit_sink_name, series, name)
-
-        # Store reference to track this GUI
-        self._open_fitting_guis[fitting_key] = fitting_gui
-
-        # Connect to window close event to clean up our reference
-        def on_window_closed():
-            if fitting_key in self._open_fitting_guis:
-                del self._open_fitting_guis[fitting_key]
-
-        # Open the fitting window
-        fitting_gui.fit_fun_window()
-
-        # Connect cleanup function to window destroyed signal if window exists
-        if hasattr(fitting_gui, 'new_window') and fitting_gui.new_window is not None:
-            fitting_gui.new_window.destroyed.connect(on_window_closed)
 
     def _add_plot_clicked(self):
         """Called when the user clicks the add button."""
