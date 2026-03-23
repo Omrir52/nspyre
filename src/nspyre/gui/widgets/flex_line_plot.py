@@ -21,6 +21,7 @@ from ..threadsafe import QThreadSafeObject
 from .layout import tree_layout
 from .line_plot import LinePlotWidget
 from .save_load import _DataBackend
+from ..style._colors import colors
 from ..style._colors import cyclic_colors
 # from .fitting import FittingGUI  # Commented out - FittingGUI not implemented
 
@@ -247,6 +248,10 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
         # data source lineedit
         self.datasource_lineedit = QtWidgets.QLineEdit()
 
+        # Initialize color manager if requested
+        if color_flip:
+            self.plot_color_manager = PlotColorManager(self)
+
         # data source connect button
         connect_button = QtWidgets.QPushButton('Connect')
         connect_button.clicked.connect(self._update_source_clicked)
@@ -254,10 +259,6 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
         # quick save button
         quick_save_button = QtWidgets.QPushButton('Quick Save')
         quick_save_button.clicked.connect(self._quick_save_clicked)
-
-        # Initialize color manager if requested
-        if color_flip:
-            self.plot_color_manager = PlotColorManager(self)
 
         # plot settings label
         plot_settings_label = QtWidgets.QLabel('Plot Settings')
@@ -700,6 +701,12 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
         """Called when quick save is complete."""
         print(f"Quick save completed: {filename}")
 
+    def teardown():
+        """
+        #TODO
+        """
+        pass
+
 
 class _FlexLinePlotWidget(LinePlotWidget):
     """See FlexLinePlotWidget."""
@@ -947,14 +954,18 @@ class _FlexLinePlotWidget(LinePlotWidget):
 
 
 class PlotColorManager:
-    """Class to manage plot color schemes between light and dark modes."""
+    """Class to manage plot color schemes between light and dark modes.
+
+    All plot item mutations are routed through the ``_LinePlotData`` thread-safe
+    mechanism so they are serialised with ``set_data``, ``add_plot``, etc.
+    """
 
     def __init__(self, plot_widget):
         """
         Initialize the plot color manager.
 
         Args:
-            plot_widget: The plot widget to manage colors for
+            plot_widget: The plot widget to manage colors for.
         """
         self.plot_widget = plot_widget
         self.color_list = cyclic_colors
@@ -978,51 +989,105 @@ class PlotColorManager:
         self.color_flip_button.addWidget(self.light_plot_button)
         self.color_flip_button.addWidget(self.dark_plot_button)
 
-    def get_plot_items(self):
-        """Get all plot items in the plot widget."""
-        return self.plot_widget.line_plot.plot_widget.items()
+    @staticmethod
+    def _extract_pen_color(pdi: pyqtgraph.PlotDataItem) -> QColor:
+        """Extract the current line colour from a ``PlotDataItem``.
 
-    def get_current_plot_colors(self) -> List[Tuple[int, int, int, int]]:
-        """
-        Get the colors currently being used by plot items using pen color attributes.
+        The pen stored in ``pdi.opts['pen']`` can be a ``QColor``, a
+        ``QPen``, or something ``mkPen`` produced.  This helper normalises
+        all of them to a ``QColor``.
+
+        Args:
+            pdi: The plot data item to read.
 
         Returns:
-            List[Tuple[int, int, int, int]]: List of RGBA color tuples currently used in plots
+            The current pen colour as a ``QColor``.
         """
-        colors = []
-        for item in self.get_plot_items():
-            if isinstance(item, pyqtgraph.PlotDataItem):
-                pen = item.opts['pen']
-                if type(pen) == QColor:
-                    colors.append(pen)
-        return colors if colors else self.color_list
+        pen = pdi.opts.get('pen')
+        if isinstance(pen, QtGui.QPen):
+            return pen.color()
+        if isinstance(pen, QColor):
+            return QColor(pen)
+        # Fallback: let pyqtgraph convert whatever it stored
+        return pyqtgraph.mkPen(pen).color()
+
+    def _collect_colors_and_apply(self, mode: str) -> None:
+        """Snapshot each plot's current pen colour and apply the theme.
+
+        Runs on the ``_LinePlotData`` worker thread while holding the
+        mutex, so no ``set_data`` / ``add_plot`` call can race with us.
+
+        Args:
+            mode: ``'light'`` or ``'dark'``.
+        """
+        plot_data = self.plot_widget.line_plot.plot_data
+        with QtCore.QMutexLocker(plot_data.mutex):
+            # Build (PlotDataItem, current_colour) while holding the lock so
+            # no plot can be added/removed and no pen can change underneath us.
+            items_to_update: List[Tuple[pyqtgraph.PlotDataItem, QColor]] = []
+            for series_data in plot_data.plots.values():
+                pdi = series_data.plot_data_item
+                if pdi is not None:
+                    items_to_update.append(
+                        (pdi, self._extract_pen_color(pdi))
+                    )
+
+        # Apply the visual changes in the main (GUI) thread.
+        plot_data.run_main(
+            self._apply_theme, mode, items_to_update, blocking=True
+        )
+
+    def _apply_theme(
+        self, mode: str, items: List[Tuple[pyqtgraph.PlotDataItem, QColor]]
+    ) -> None:
+        """Apply colour/style changes to plot items.  Runs in the main thread.
+
+        Both modes preserve each plot's original line colour.  Light mode
+        uses a white background with thicker pen lines and no symbols.
+        Dark mode restores the ``LinePlotWidget`` defaults:
+        ``colors['black']`` background, pen width 1, ``'o'`` symbols at
+        size 3 with ``(255, 255, 255, 100)`` brushes.
+
+        Args:
+            mode: ``'light'`` or ``'dark'``.
+            items: List of ``(PlotDataItem, original_colour)`` tuples.
+        """
+        pw = self.plot_widget.line_plot.plot_widget
+        if mode == 'light':
+            pw.setBackground('w')
+            for pdi, color in items:
+                pdi.setPen(pyqtgraph.mkPen(color=color, width=5))
+                pdi.setSymbolBrush(pyqtgraph.mkBrush(color=(10, 10, 10, 100)))
+                pdi.setSymbolPen(pyqtgraph.mkPen(color=(10, 10, 10, 100)))
+                pdi.setSymbol('o')
+                pdi.setSymbolSize(0)
+            self.color_flip_button.setCurrentIndex(1)
+        else:
+            # Restore the default LinePlotWidget appearance
+            pw.setBackground(pyqtgraph.mkColor(colors['black']))
+            for pdi, color in items:
+                pdi.setPen(pyqtgraph.mkPen(color=color, width=1))
+                pdi.setSymbolBrush(
+                    pyqtgraph.mkBrush(color=(255, 255, 255, 100))
+                )
+                pdi.setSymbolPen(
+                    pyqtgraph.mkPen(color=(255, 255, 255, 100))
+                )
+                pdi.setSymbol('o')
+                pdi.setSymbolSize(3)
+            self.color_flip_button.setCurrentIndex(0)
 
     def light_plot(self) -> None:
-        """Switch to light plot mode."""
-        self.color_list = self.get_current_plot_colors()  # Get colors when button clicked
-        self.plot_widget.line_plot.plot_widget.setBackground('white')
-        item_counter = 0
-        for item in self.get_plot_items():
-            if isinstance(item, pyqtgraph.PlotDataItem):
-                item.setPen(pyqtgraph.mkPen(
-                    color=self.color_list[item_counter], width=5))
-                item.setSymbolBrush(pyqtgraph.mkBrush(color=(10, 10, 10, 100)))
-                item.setSymbolSize(0)
-                item_counter += 1
-        self.color_flip_button.setCurrentIndex(1)
+        """Switch to light plot mode (thread-safe)."""
+        self.plot_widget.line_plot.plot_data.run_safe(
+            self._collect_colors_and_apply, 'light'
+        )
 
     def dark_plot(self) -> None:
-        """Switch to dark plot mode."""
-        self.plot_widget.line_plot.plot_widget.setBackground('k')
-        item_counter = 0
-        for item in self.get_plot_items():
-            if isinstance(item, pyqtgraph.PlotDataItem):
-                item.setPen(pyqtgraph.mkPen(
-                    color=self.color_list[item_counter], width=1))
-                item.setSymbolBrush(pyqtgraph.mkBrush(color=(240, 240, 240, 100)))
-                item.setSymbolSize(5)
-                item_counter += 1
-        self.color_flip_button.setCurrentIndex(0)
+        """Switch to dark plot mode (thread-safe)."""
+        self.plot_widget.line_plot.plot_data.run_safe(
+            self._collect_colors_and_apply, 'dark'
+        )
 
 
 class FittingGui:
