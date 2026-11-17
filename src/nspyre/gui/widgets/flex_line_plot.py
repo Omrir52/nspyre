@@ -701,10 +701,12 @@ np.array([[4, 5, 6], [3.4, 3.6, 3.5]])])
         """Called when quick save is complete."""
         print(f"Quick save completed: {filename}")
 
-    def teardown():
-        """
-        #TODO
-        """
+    def closeEvent(self, event):
+        self.line_plot._stop()
+        self.quick_save_backend.stop()
+        super().closeEvent(event)
+
+    def teardown(self):
         pass
 
 

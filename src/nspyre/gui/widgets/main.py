@@ -256,7 +256,8 @@ class MainWidget(QtWidgets.QWidget):
         dock = Dock(*args, **kwargs)
         dock.setOrientation(o='vertical', force=True)
         dock.addWidget(widget)
-        # make sure the widget gets deleted when the dock is closed by the user
+        # close the widget first (runs closeEvent for thread cleanup) then delete it
+        dock.sigClosed.connect(widget.close)
         dock.sigClosed.connect(widget.deleteLater)
         self.dock_area.addDock(dock, 'right')
 

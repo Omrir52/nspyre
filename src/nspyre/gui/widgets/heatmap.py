@@ -104,6 +104,9 @@ class HeatMapWidget(QtWidgets.QWidget):
         # Enable keyboard focus to capture key events
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
 
+        # Default timeout for sink.pop() calls in subclasses (seconds)
+        self.sink_timeout = 0.2
+
         # TODO
         self.destroyed.connect(partial(self._stop))
 
@@ -188,20 +191,29 @@ class HeatMapWidget(QtWidgets.QWidget):
         """
         # block until any previous calls to set_data have been fully processed
         self.image['sem'].acquire()
-        # set the new x and y data
-        self.image['x'] = xs
-        self.image['y'] = ys
-        if zs is not None:
-            self.image['z'] = zs
-        self.image['data'] = data
-        # notify the watcher
+        # _process_data releases the semaphore after drawing, so only release it
+        # here if no draw gets queued; releasing in both places would let the
+        # count grow and the worker overwrite self.image while it is being drawn
+        draw_queued = False
         try:
-            self.parent()
-        except RuntimeError:            # this Qt object has already been deleted
-            return
-        else:
-            # notify that new data is available
-            self.new_data.emit()
+            # set the new x and y data
+            self.image['x'] = xs
+            self.image['y'] = ys
+            if zs is not None:
+                self.image['z'] = zs
+            self.image['data'] = data
+            # notify the watcher
+            try:
+                self.parent()
+            except RuntimeError:            # this Qt object has already been deleted
+                return
+            else:
+                # notify that new data is available
+                self.new_data.emit()
+                draw_queued = True
+        finally:
+            if not draw_queued:
+                self.image['sem'].release()
 
     def _toggle_crosshair(self, checked):
         """Toggle crosshair mode on/off."""

@@ -3,18 +3,26 @@ import queue
 import subprocess
 import threading
 import time
+from datetime import datetime
 from functools import partial
 from importlib import reload
 from multiprocessing import Queue
+from pathlib import Path
 from types import ModuleType
 from typing import Dict
 from typing import Optional
+from typing import Union
 
+from pyqtgraph.Qt import QtCore
 from pyqtgraph.Qt import QtWidgets
 
+from ...data.file import AutoSaver
 from ...misc.misc import ProcessRunner
 from ...misc.misc import run_experiment
 from .params import ParamsWidget
+
+AUTOSAVE_DIR = Path.home() / 'Documents' / 'autosave'
+"""Default directory for experiment autosave files."""
 
 
 class ExperimentWidget(QtWidgets.QWidget):
@@ -38,6 +46,10 @@ class ExperimentWidget(QtWidgets.QWidget):
         kill: bool = False,
         layout: QtWidgets.QLayout = None,
         pyro_reboot: bool = False,
+        stop_timeout: float = 5.0,
+        autosave: bool = False,
+        autosave_interval: float = 30,
+        autosave_dir: Optional[Union[str, Path]] = None,
     ):
         """
         Args:
@@ -64,6 +76,16 @@ class ExperimentWidget(QtWidgets.QWidget):
                 run/stop/kill buttons.
             pyro_reboot: Enable timeout-based stopping with automatic pyro daemon
                 restart if the process doesn't stop gracefully.
+            stop_timeout: With pyro_reboot, seconds to wait after Stop before
+                force-killing the experiment process.
+            autosave: Automatically save the experiment's data set (the
+                :code:`dataset` keyword argument passed to the experiment
+                function) to a pickle file while the experiment runs. Each run
+                gets its own file, named with the experiment class, data set,
+                and start time, which is overwritten with the latest data.
+            autosave_interval: Minimum time (s) between autosaves.
+            autosave_dir: Directory for autosave files. A subdirectory is
+                created for each day. Defaults to :py:data:`AUTOSAVE_DIR`.
         """
         super().__init__()
 
@@ -74,6 +96,11 @@ class ExperimentWidget(QtWidgets.QWidget):
         self.cls = cls
         self.fun_name = fun_name
         self.pyro_reboot = pyro_reboot
+        self.stop_timeout = stop_timeout
+        self.autosave = autosave
+        self.autosave_interval = autosave_interval
+        self.autosave_dir = Path(autosave_dir) if autosave_dir else AUTOSAVE_DIR
+        self._autosaver: Optional[AutoSaver] = None
 
         if constructor_args is not None:
             self.constructor_args = constructor_args
@@ -137,6 +164,16 @@ class ExperimentWidget(QtWidgets.QWidget):
         if kill:
             params_layout.addWidget(kill_button)
 
+        # time of the last autosave (the file name is logged to the terminal)
+        self.autosave_label = QtWidgets.QLabel('')
+        self.autosave_label.setVisible(autosave)
+        params_layout.addWidget(self.autosave_label)
+        # polls the experiment process so the autosave can be finalized when it ends
+        self._autosave_timer = QtCore.QTimer(self)
+        self._autosave_timer.setInterval(500)
+        self._autosave_timer.timeout.connect(self._check_autosave)
+        self.destroyed.connect(lambda *_: self._stop_autosave())
+
         self.setLayout(params_layout)
 
     def additional_constructor_kwargs(self) -> Dict:
@@ -187,6 +224,8 @@ class ExperimentWidget(QtWidgets.QWidget):
             **self.fun_kwargs,
             **self.additional_fun_kwargs(),
         )
+        if self.autosave:
+            self._start_autosave(fun_kwargs.get('dataset'))
         # call the function in a new process
         self.run_proc.run(
             run_experiment,
@@ -197,6 +236,55 @@ class ExperimentWidget(QtWidgets.QWidget):
             fun_args=self.fun_args,
             fun_kwargs=fun_kwargs,
         )
+
+    def _start_autosave(self, dataset: Optional[str]):
+        """Start a new autosave file for the experiment that is about to run."""
+        # finish the previous run's final save so it can't pick up the new run's data
+        self._stop_autosave()
+        if not dataset:
+            logging.warning('Not autosaving because the experiment has no dataset.')
+            return
+        start = datetime.now()
+        safe_dataset = ''.join(c if c.isalnum() or c in '-_' else '_' for c in dataset)
+        filename = (
+            self.autosave_dir
+            / start.strftime('%Y-%m-%d')
+            / f'{self.cls}_{safe_dataset}_{start.strftime("%Y%m%d_%H%M%S")}.pickle'
+        )
+        try:
+            self._autosaver = AutoSaver(
+                dataset, filename, min_interval=self.autosave_interval
+            )
+            self._autosaver.start()
+        except Exception as err:
+            logging.warning(f'Failed to start autosave: {err}')
+            self._autosaver = None
+            self.autosave_label.setText('Autosave failed')
+            return
+        self.autosave_label.setText('')
+        self._autosave_timer.start()
+
+    def _stop_autosave(self, timeout: float = 5):
+        """Do the final autosave and wait for it to finish."""
+        if self._autosaver is not None:
+            self._autosaver.stop()
+            self._autosaver.join(timeout=timeout)
+
+    def _check_autosave(self):
+        """Show the last autosave time, and finalize the autosave once the
+        experiment process has ended."""
+        autosaver = self._autosaver
+        if autosaver is None:
+            self._autosave_timer.stop()
+            return
+        if not self.run_proc.running():
+            # final save happens in the autosave thread
+            autosaver.stop()
+        if autosaver.last_save_time is not None:
+            t = datetime.fromtimestamp(autosaver.last_save_time).strftime('%H:%M:%S')
+            self.autosave_label.setText(f'Autosaved {t}')
+        if not autosaver.is_alive():
+            self._autosave_timer.stop()
 
     def stop(self, log: bool = True):
         """Request the experiment subprocess to stop by sending the string :code:`stop`
@@ -224,7 +312,7 @@ class ExperimentWidget(QtWidgets.QWidget):
         def force_kill_after_timeout():
             """Kill the process if it doesn't stop gracefully within timeout."""
             check_interval = 0.5  # Check every 0.5 seconds
-            max_checks = 10       # Check 10 times (total 5 seconds)
+            max_checks = max(1, int(round(self.stop_timeout / check_interval)))
 
             for check_count in range(max_checks):
                 time.sleep(check_interval)

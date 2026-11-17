@@ -19,6 +19,10 @@ from .streaming._pickle import streaming_load_pickle_diff
 
 _logger = logging.getLogger(__name__)
 
+# maximum delay (s) between reconnect attempts when the server keeps dropping the
+# connection without sending anything (e.g. the data set doesn't exist yet)
+_MAX_RECONNECT_DELAY = 10.0
+
 
 class DataSink(AsyncioWorker):
     """For sinking data from the :py:class:`~nspyre.data.server.DataServer`.
@@ -112,6 +116,10 @@ class DataSink(AsyncioWorker):
             # asyncio queue for buffering data from the server
             self._queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
 
+            # back off reconnect attempts while the server immediately drops us
+            reconnect_delay = _FAST_TIMEOUT
+            quiet_drops = 0
+
             while True:
                 try:
                     # connect to the data server
@@ -134,7 +142,10 @@ class DataSink(AsyncioWorker):
                         ) from err
 
                 sock = _CustomSock(sock_reader, sock_writer)
-                _logger.info(f'Sink connected to data server [{sock.addr}].')
+                if quiet_drops == 0:
+                    _logger.info(f'Sink connected to data server [{sock.addr}].')
+                else:
+                    _logger.debug(f'Sink connected to data server [{sock.addr}].')
 
                 try:
                     # notify the server that this is a data sink client
@@ -172,6 +183,7 @@ class DataSink(AsyncioWorker):
                 # connection succeeded, so trigger the main thread to continue execution
                 self._sem.release()
 
+                received_any = False
                 while True:
                     try:
                         # get data from the server
@@ -181,15 +193,35 @@ class DataSink(AsyncioWorker):
                     except (asyncio.IncompleteReadError, asyncio.TimeoutError):
                         # if there was a timeout / problem receiving the message the
                         # data server / connection is dead
-                        _logger.info(
-                            f'Sink data server [{sock.addr}] disconnected or hasn\'t '
-                            'sent a keepalive message - dropping connection.'
-                        )
+                        if received_any:
+                            _logger.info(
+                                f'Sink data server [{sock.addr}] disconnected or '
+                                'hasn\'t sent a keepalive message - dropping '
+                                'connection.'
+                            )
+                        elif quiet_drops == 0:
+                            # the server closed the connection without sending
+                            # anything, usually because the data set doesn't exist
+                            _logger.info(
+                                f'Sink data server [{sock.addr}] dropped the '
+                                f'connection to data set [{self._name}] (it may not '
+                                'exist yet) - retrying with backoff.'
+                            )
+                        else:
+                            _logger.debug(
+                                f'Sink data server [{sock.addr}] dropped the '
+                                f'connection to data set [{self._name}] again.'
+                            )
                         try:
                             await sock.close()
                         except IOError:
                             pass
                         break
+
+                    # the connection is alive, so reset the backoff
+                    received_any = True
+                    reconnect_delay = _FAST_TIMEOUT
+                    quiet_drops = 0
 
                     if not new_data:
                         # keepalive message
@@ -224,7 +256,11 @@ class DataSink(AsyncioWorker):
                                 'increase the client processing throughput.'
                             ) from err
                     _logger.debug(f'Sink queued pickle of [{len(new_data)}] bytes.')
-                await asyncio.sleep(_FAST_TIMEOUT)
+
+                await asyncio.sleep(reconnect_delay)
+                if not received_any:
+                    quiet_drops += 1
+                    reconnect_delay = min(reconnect_delay * 2, _MAX_RECONNECT_DELAY)
 
         except ConnectionError as err:
             self._exc = err

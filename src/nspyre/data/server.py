@@ -25,6 +25,7 @@ The data server can be started using the command-line interface, e.g.:
 """
 import asyncio
 import logging
+import os
 import selectors
 import socket
 from typing import Dict
@@ -64,6 +65,10 @@ _NEGOTIATION_TIMEOUT = _TIMEOUT
 
 # timeout for relatively quick operations
 _FAST_TIMEOUT = 1.0
+
+# asyncio debug mode logs every callback slower than 0.1 s and adds overhead, so
+# only enable it when NSPYRE_ASYNCIO_DEBUG is set (e.g. NSPYRE_ASYNCIO_DEBUG=1)
+_ASYNCIO_DEBUG = os.environ.get('NSPYRE_ASYNCIO_DEBUG', '') not in ('', '0')
 
 # length (bytes) of the header section that identifies how large the payload is
 _HEADER_MSG_LEN = 8
@@ -353,7 +358,7 @@ class DataServer:
         """Run the asyncio event loop - ayncio requires this be run in the main thread
         if processes are to be spawned from the event loop.
         See https://docs.python.org/3/library/asyncio-dev.html."""
-        self.event_loop.set_debug(True)
+        self.event_loop.set_debug(_ASYNCIO_DEBUG)
         asyncio.set_event_loop(self.event_loop)
         try:
             self.event_loop.call_soon(self._main_helper)

@@ -444,7 +444,8 @@ class LinePlotWidget(QtWidgets.QWidget):
                 return
             else:
                 raise err
-        self.plot_data.sem.release()
+        finally:
+            self.plot_data.sem.release()
 
     # TODO
     # def add_zoom_region(self):

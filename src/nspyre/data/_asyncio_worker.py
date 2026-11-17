@@ -7,6 +7,7 @@ import time
 from threading import Semaphore
 from threading import Thread
 
+from .server import _ASYNCIO_DEBUG
 from .server import _cleanup_event_loop
 
 _logger = logging.getLogger(__name__)
@@ -79,7 +80,7 @@ class AsyncioWorker:
         """Run the asyncio event loop - this may be run in a separate thread because
         we aren't starting any subprocesses or responding to signals."""
         _logger.debug(f'Started DataSource event loop thread {self._thread}.')
-        self._event_loop.set_debug(True)
+        self._event_loop.set_debug(_ASYNCIO_DEBUG)
         asyncio.set_event_loop(self._event_loop)
         try:
             self._event_loop.call_soon(self._main_helper)

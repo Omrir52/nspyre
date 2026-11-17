@@ -130,7 +130,42 @@ class QThreadSafeObject(QtCore.QObject):
     def stop(self):
         """Quit the internal thread."""
         self.stopped = True
+        # Request interruption first to give running tasks a chance to stop.
+        try:
+            self.thread.requestInterruption()
+        except Exception:
+            pass
+
+        # Ask the thread to quit its event loop.
         self.thread.quit()
+
+        # Wait in short intervals while allowing the main event loop to process
+        # pending events. This avoids a long blocking wait that can deadlock
+        # when worker threads are waiting for GUI callbacks.
+        total_wait_ms = 5000
+        interval_ms = 100
+        waited = 0
+        app = None
+        try:
+            app = QtWidgets.QApplication.instance()
+        except Exception:
+            app = None
+
+        while self.thread.isRunning() and waited < total_wait_ms:
+            # process GUI events to allow any queued callbacks to run
+            if app is not None:
+                app.processEvents()
+            self.thread.wait(interval_ms)
+            waited += interval_ms
+
+        if self.thread.isRunning():
+            # if the owner is deleted now, Qt aborts the whole GUI with
+            # 'QThread: Destroyed while thread is still running'
+            _logger.error(
+                f'{type(self).__name__} thread did not stop within '
+                f'{total_wait_ms / 1000:g} s - a blocking call (e.g. a long '
+                'sink.pop() timeout) is likely holding it.'
+            )
 
     def run_main(self, fun, *args, blocking=False, **kwargs):
         """Run the given function on the main thread.

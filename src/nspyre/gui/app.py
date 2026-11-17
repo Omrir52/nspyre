@@ -1,9 +1,12 @@
 """
 nspyre application Qt GUI settings.
 """
+import faulthandler
 import gc
 import logging
 import sys
+import threading
+import traceback
 from pathlib import Path
 
 from pyqtgraph import _connectCleanup
@@ -19,6 +22,82 @@ from .style._style import nspyre_style_sheet
 _logger = logging.getLogger(__name__)
 
 _HERE = Path(__file__).parent
+
+# keep the faulthandler file open for the life of the process
+_fault_file = None
+
+
+def _log_unhandled_exception(exc_type, exc_value, exc_tb):
+    """sys.excepthook that logs instead of letting PyQt abort the process.
+
+    PyQt5 >= 5.5 calls qFatal() (killing the GUI without notice) when an
+    exception escapes a Python slot, unless a custom sys.excepthook is set.
+    """
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    _logger.error(
+        'Unhandled exception:\n'
+        + ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    )
+
+
+def _log_unhandled_thread_exception(args):
+    """threading.excepthook that logs exceptions from Python threads."""
+    if args.exc_type is SystemExit:
+        return
+    _logger.error(
+        f'Unhandled exception in thread [{getattr(args.thread, "name", None)}]:\n'
+        + ''.join(
+            traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)
+        )
+    )
+
+
+def _qt_message_handler(mode, context, message):
+    """Route Qt warnings (e.g. 'QThread: Destroyed while thread is still
+    running', which precedes a fatal abort) into the nspyre log."""
+    if mode == QtCore.QtMsgType.QtDebugMsg:
+        _logger.debug(f'Qt: {message}')
+    elif mode == QtCore.QtMsgType.QtInfoMsg:
+        _logger.info(f'Qt: {message}')
+    elif mode == QtCore.QtMsgType.QtWarningMsg:
+        _logger.warning(f'Qt: {message}')
+    else:
+        _logger.critical(f'Qt: {message}')
+        for handler in logging.getLogger().handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+
+
+def _enable_crash_reporting():
+    """Install exception hooks and dump native crashes (segfaults, aborts) to a
+    file next to the nspyre log file, or to stderr if there is no log file."""
+    global _fault_file
+    sys.excepthook = _log_unhandled_exception
+    threading.excepthook = _log_unhandled_thread_exception
+    QtCore.qInstallMessageHandler(_qt_message_handler)
+
+    if faulthandler.is_enabled():
+        return
+    log_dir = None
+    for handler in logging.getLogger().handlers:
+        base_filename = getattr(handler, 'baseFilename', None)
+        if base_filename:
+            log_dir = Path(base_filename).parent
+            break
+    try:
+        if log_dir is not None:
+            crash_path = log_dir / 'faulthandler.log'
+            _fault_file = open(crash_path, 'a')
+            faulthandler.enable(file=_fault_file, all_threads=True)
+            _logger.info(f'Native crash tracebacks will be written to [{crash_path}].')
+        elif sys.stderr is not None:
+            faulthandler.enable(all_threads=True)
+    except Exception as err:
+        _logger.warning(f'Could not enable faulthandler: {err}')
 
 
 class nspyreApp(QtWidgets.QApplication):
@@ -58,6 +137,9 @@ class nspyreApp(QtWidgets.QApplication):
             QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
 
         super().__init__(sys.argv)
+
+        # log errors that would otherwise silently kill the GUI
+        _enable_crash_reporting()
 
         self.setApplicationName(app_name)
         # dock icon
